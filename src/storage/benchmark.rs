@@ -1,13 +1,24 @@
 #[cfg(test)]
 mod tests {
     use crate::storage::bit_cask::new_bit_cask;
-    use crate::storage::KV;
-    use std::thread;
+    use crate::storage::{KVStorage, KV};
+    use std::path::Path;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::{fs, thread};
+
+    const DATA_DIR: &str = "test-data";
+
+    fn clear_data() {
+        let path = Path::new(DATA_DIR);
+        if path.exists() {
+            fs::remove_dir_all(path).expect("Failed to remove test directory");
+        }
+    }
 
     #[test]
     fn insert_retrieve_test() {
-        let storage = new_bit_cask("test-data");
+        clear_data();
+        let storage = new_bit_cask(DATA_DIR);
         assert!(storage.is_ok());
         let mut storage = storage.unwrap();
         let put_result = storage.put(123, "my-value".to_string());
@@ -19,7 +30,8 @@ mod tests {
 
     #[test]
     fn bulk_insert_retrieve_test() {
-        let storage = new_bit_cask("test-data");
+        clear_data();
+        let storage = new_bit_cask(DATA_DIR);
         assert!(storage.is_ok());
         let mut storage = storage.unwrap();
         let put_result = storage.batch_put(vec![
@@ -67,7 +79,7 @@ mod tests {
 
         use std::time::Instant;
         let now = Instant::now();
-        let storage = new_bit_cask("test-data");
+        let storage = new_bit_cask(DATA_DIR);
         assert!(storage.is_ok());
         let mut storage = storage.unwrap();
         let put_result = storage.batch_put(records);
@@ -88,7 +100,7 @@ mod tests {
         let record_count = 1_000_000;
         use std::time::Instant;
         let now = Instant::now();
-        let storage = new_bit_cask("test-data");
+        let storage = new_bit_cask(DATA_DIR);
         assert!(storage.is_ok());
         let mut storage = storage.unwrap();
 
@@ -111,7 +123,7 @@ mod tests {
         // Max memory used was 7 GB
         let record_count = 50_000_000;
         let batch_size = 1_000_000;
-        let storage = new_bit_cask("test-data");
+        let storage = new_bit_cask(DATA_DIR);
         assert!(storage.is_ok());
         let mut storage = storage.unwrap();
 

@@ -21,13 +21,14 @@ struct Key {
     length: usize,
 }
 
+#[derive(Clone, Default)]
 pub struct BitCask {
     pub(crate) data_dir: String,
     active_dir: String,
     key_dir: Arc<Mutex<BTreeMap<usize, Key>>>,
 }
 
-pub fn new_bit_cask(data_dir: &str) -> Result<Box<dyn KVStorage>, Error> {
+pub fn new_bit_cask(data_dir: &str) -> Result<BitCask, Error> {
     let mut bc = BitCask {
         data_dir: data_dir.to_string(),
         active_dir: Default::default(),
@@ -36,7 +37,7 @@ pub fn new_bit_cask(data_dir: &str) -> Result<Box<dyn KVStorage>, Error> {
 
     bc.init()?;
 
-    Ok(Box::new(bc))
+    Ok(bc)
 }
 
 impl KVStorage for BitCask {
@@ -199,7 +200,7 @@ impl BitCask {
             // killed off when main program finishes
             loop {
                 let key_dir = Arc::clone(&key_dir);
-                thread::sleep(Duration::from_millis(10_000));
+                thread::sleep(Duration::from_secs(60));
                 println!("compaction starting...");
                 // copy key_dir to avoid locking other processes
                 let cloned_key_dir = {

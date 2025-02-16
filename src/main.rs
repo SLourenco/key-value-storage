@@ -1,11 +1,16 @@
 // #![feature(test)]
 // extern crate test;
+use crate::distributed::node::{Follower, LogEntry};
+mod distributed;
+mod http;
 mod storage;
 
-use crate::storage::bit_cask::new_bit_cask;
-use crate::storage::{KVStorage, KV};
+use crate::distributed::rpc::{AppendEntriesRequest, VoteRequest};
+use crate::distributed::{new_distributed_storage, DistributedStorage};
+use crate::http::read_headers;
+use crate::storage::KV;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Error, ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::{env, str};
 
@@ -17,6 +22,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     let mut port = DEFAULT_PORT;
     let mut data_dir = DEFAULT_DATA_DIR;
+    let mut distributed = true;
 
     for i in 0..args.len() {
         if args[i] == "port" && i + 1 < args.len() {
@@ -25,6 +31,10 @@ fn main() {
         if args[i] == "data-dir" && i + 1 < args.len() {
             data_dir = &args[i + 1];
         }
+
+        if args[i] == "distributed" && i + 1 < args.len() {
+            distributed = (&args[i + 1]).parse().unwrap();
+        }
     }
 
     let endpoint = format!("{}:{}", HOST, port);
@@ -32,24 +42,25 @@ fn main() {
         TcpListener::bind(endpoint).expect(format!("Failed to bind to port {}", port).as_str());
     println!("HTTP server running on {}...", port);
 
-    let kv_storage = new_bit_cask(data_dir);
-    if let Err(e) = kv_storage {
-        println!("Failed to initialize storage: {}", e);
+    let distributed_storage =
+        new_distributed_storage(HOST, port.parse().unwrap(), data_dir, distributed);
+    if let Err(e) = distributed_storage {
+        println!("Failed to initialize distributed storage: {}", e);
         return;
     }
 
-    let mut kv_storage = kv_storage.unwrap();
+    let mut distributed_storage = distributed_storage.unwrap();
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                handle_client(stream, &mut kv_storage);
+                handle_client(stream, &mut distributed_storage);
             }
             Err(e) => eprintln!("Connection failed: {}", e),
         }
     }
 }
 
-fn handle_client(mut stream: TcpStream, kv_storage: &mut Box<dyn KVStorage>) {
+fn handle_client(mut stream: TcpStream, distributed_storage: &mut DistributedStorage) {
     let mut reader = BufReader::new(&stream);
     let mut request_line = String::new();
 
@@ -66,12 +77,42 @@ fn handle_client(mut stream: TcpStream, kv_storage: &mut Box<dyn KVStorage>) {
     let method = request_parts[0]; // HTTP method
     let path = request_parts[1]; // URL path (may include query params)
     let (route, query_params) = parse_path(path);
-    let (_, body) = read_request(reader);
 
     let response = match (method, route) {
-        ("GET", "/") => get(query_params, kv_storage),
-        ("POST", "/") => put(body, kv_storage),
-        ("DELETE", "/") => delete(query_params, kv_storage),
+        ("GET", "/") => get(query_params, distributed_storage),
+        ("POST", "/append-entries") => {
+            let result = read_append_entries_request(reader);
+            let s = match result {
+                Err(e) => format_response(format!("Failed to read response: {}", e.to_string())),
+                Ok((_, v)) => {
+                    let r = distributed_storage.node.append_entries(v);
+                    match r {
+                        Err(e) => format_response(format!("Failed to append entries: {}", e)),
+                        Ok((term, ok)) => format_response(format!("{},{}", term, ok)),
+                    }
+                }
+            };
+            s
+        }
+        ("POST", "/request-vote") => {
+            let result = read_vote_request(reader);
+            let s = match result {
+                Err(e) => format_response(format!("Failed to read response: {}", e.to_string())),
+                Ok((_, v)) => {
+                    let r = distributed_storage.node.vote(v);
+                    match r {
+                        Err(e) => format_response(format!("Failed to request vote: {}", e)),
+                        Ok((term, ok)) => format_response(format!("{},{}", term, ok)),
+                    }
+                }
+            };
+            s
+        }
+        ("POST", "/") => {
+            let (_, body) = read_kv_request(reader);
+            put(body, distributed_storage)
+        }
+        ("DELETE", "/") => delete(query_params, distributed_storage),
         _ => default_response(),
     };
 
@@ -95,21 +136,13 @@ fn parse_path(path: &str) -> (&str, HashMap<String, String>) {
     (route, query_params)
 }
 
-fn read_request(mut reader: BufReader<&TcpStream>) -> (HashMap<String, String>, Vec<KV>) {
-    let mut headers = HashMap::new();
-    let mut content_length = 0;
-    for line in reader.by_ref().lines() {
-        let line = line.unwrap();
-        if line.is_empty() {
-            break; // End of headers
-        }
-        if let Some((key, value)) = line.split_once(": ") {
-            headers.insert(key.to_lowercase(), value.to_string());
-            if key.to_lowercase() == "content-length" {
-                content_length = value.parse().unwrap_or(0);
-            }
-        }
-    }
+fn read_kv_request(mut reader: BufReader<&TcpStream>) -> (HashMap<String, String>, Vec<KV>) {
+    let headers = read_headers(&mut reader);
+    let content_length = headers
+        .get("content-length")
+        .unwrap_or(&"0".to_string())
+        .parse()
+        .unwrap_or(0);
 
     let mut body_map = Vec::new();
     if content_length > 0 {
@@ -129,6 +162,113 @@ fn read_request(mut reader: BufReader<&TcpStream>) -> (HashMap<String, String>, 
     }
 
     (headers, body_map)
+}
+
+fn read_append_entries_request(
+    mut reader: BufReader<&TcpStream>,
+) -> Result<(HashMap<String, String>, AppendEntriesRequest), Error> {
+    let headers = read_headers(&mut reader);
+    let content_length = headers
+        .get("content-length")
+        .unwrap_or(&"0".to_string())
+        .parse()
+        .unwrap_or(0);
+
+    if content_length <= 0 {
+        return Err(Error::new(ErrorKind::InvalidInput, "Content is empty"));
+    }
+
+    let mut buffer = vec![0; content_length];
+    let mut append_entries_request: AppendEntriesRequest = Default::default();
+    if reader.read_exact(&mut buffer).is_ok() {
+        let content = String::from_utf8_lossy(&buffer);
+        for line in content.lines() {
+            // e.g.: 6000,2,5000,0,0,,0
+            let mut parts = line.split(',');
+            if let (
+                Some(node),
+                Some(term),
+                Some(leader_id),
+                Some(prev_log_idx),
+                Some(prev_log_term),
+                Some(entries),
+                Some(lead_commit),
+            ) = (
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+            ) {
+                append_entries_request.node = node.parse().unwrap();
+                append_entries_request.term = term.parse().unwrap();
+                append_entries_request.leader_id = leader_id.parse().unwrap();
+                append_entries_request.prev_log_idx = prev_log_idx.parse().unwrap();
+                append_entries_request.prev_log_term = prev_log_term.parse().unwrap();
+                if entries.len() > 0 {
+                    let entries = entries.split('+');
+                    for e in entries {
+                        if e.len() <= 0 {
+                            continue;
+                        }
+                        let mut le: LogEntry = Default::default();
+                        le = le.parse(e)?;
+                        append_entries_request.entries.push(le);
+                    }
+                }
+                append_entries_request.lead_commit = lead_commit.parse().unwrap();
+            }
+        }
+    }
+
+    Ok((headers, append_entries_request))
+}
+
+fn read_vote_request(
+    mut reader: BufReader<&TcpStream>,
+) -> Result<(HashMap<String, String>, VoteRequest), Error> {
+    let headers = read_headers(&mut reader);
+    let content_length = headers
+        .get("content-length")
+        .unwrap_or(&"0".to_string())
+        .parse()
+        .unwrap_or(0);
+
+    if content_length <= 0 {
+        return Err(Error::new(ErrorKind::InvalidInput, "Content is empty"));
+    }
+
+    let mut buffer = vec![0; content_length];
+    let mut vote_request: VoteRequest = Default::default();
+    if reader.read_exact(&mut buffer).is_ok() {
+        let content = String::from_utf8_lossy(&buffer);
+        for line in content.lines() {
+            let mut parts = line.split(',');
+            if let (
+                Some(node),
+                Some(term),
+                Some(candidate_id),
+                Some(last_log_idx),
+                Some(last_log_term),
+            ) = (
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+            ) {
+                vote_request.node = node.parse().unwrap();
+                vote_request.term = term.parse().unwrap();
+                vote_request.candidate_id = candidate_id.parse().unwrap();
+                vote_request.last_log_idx = last_log_idx.parse().unwrap();
+                vote_request.last_log_term = last_log_term.parse().unwrap();
+            }
+        }
+    }
+
+    Ok((headers, vote_request))
 }
 
 // Basic HTTP response
@@ -158,10 +298,10 @@ fn default_response() -> String {
     ))
 }
 
-fn get(query_params: HashMap<String, String>, kv_storage: &Box<dyn KVStorage>) -> String {
+fn get(query_params: HashMap<String, String>, storage: &DistributedStorage) -> String {
     let key = query_params.get("key").cloned();
     if let Some(key) = key {
-        let result = kv_storage.get(key.parse().unwrap());
+        let result = storage.get(key.parse().unwrap());
         return match result {
             Err(result) => {
                 format_response(format!("Failed to read response: {}", result.to_string()))
@@ -173,7 +313,7 @@ fn get(query_params: HashMap<String, String>, kv_storage: &Box<dyn KVStorage>) -
     let start_key = query_params.get("start_key").cloned();
     let end_key = query_params.get("end_key").cloned();
     if start_key.is_some() && end_key.is_some() {
-        let result = kv_storage.range(
+        let result = storage.range(
             start_key.unwrap().parse().unwrap(),
             end_key.unwrap().parse().unwrap(),
         );
@@ -185,7 +325,7 @@ fn get(query_params: HashMap<String, String>, kv_storage: &Box<dyn KVStorage>) -
     default_response()
 }
 
-fn put(body: Vec<KV>, kv_storage: &mut Box<dyn KVStorage>) -> String {
+fn put(body: Vec<KV>, storage: &mut DistributedStorage) -> String {
     println!("Received: {:?}", body);
     if body.len() == 0 {
         return default_response();
@@ -193,7 +333,7 @@ fn put(body: Vec<KV>, kv_storage: &mut Box<dyn KVStorage>) -> String {
 
     if body.len() == 1 {
         let f = body.first().cloned().unwrap();
-        let result = kv_storage.put(f.key, f.value);
+        let result = storage.put(f.key, f.value);
         return match result {
             Err(result) => {
                 format_response(format!("Failed to put key. Err {}", result.to_string()))
@@ -202,7 +342,7 @@ fn put(body: Vec<KV>, kv_storage: &mut Box<dyn KVStorage>) -> String {
         };
     }
 
-    let result = kv_storage.batch_put(body);
+    let result = storage.batch_put(body);
     match result {
         Err(result) => format_response(format!(
             "Failed to batch put keys. Err: {}",
@@ -212,10 +352,10 @@ fn put(body: Vec<KV>, kv_storage: &mut Box<dyn KVStorage>) -> String {
     }
 }
 
-fn delete(query_params: HashMap<String, String>, kv_storage: &mut Box<dyn KVStorage>) -> String {
+fn delete(query_params: HashMap<String, String>, storage: &mut DistributedStorage) -> String {
     let key = query_params.get("key").cloned();
     if let Some(key) = key {
-        let result = kv_storage.delete(key.parse().unwrap());
+        let result = storage.delete(key.parse().unwrap());
         return match result {
             Err(result) => format_response(format!("Failed to delete: {}", result.to_string())),
             Ok(()) => format_response("Key deleted".to_string()),

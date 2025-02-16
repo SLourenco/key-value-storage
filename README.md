@@ -1,6 +1,8 @@
 # Key Value Storage
 
-Implements the Bitcask algorithm, with a BTreeMap structure for keys, allowing range lookup.
+Implements a distributed storage, with a consensus algorithm based
+on [raft](https://web.stanford.edu/~ouster/cgi-bin/papers/raft-atc14.pdf).
+Backing it, is a storage based on the Bitcask algorithm, with a BTreeMap structure for keys, allowing range lookup.
 
 ## Exercise Requirements
 
@@ -53,16 +55,57 @@ For production ready code, alternatives like gRPC should be considered to reduce
 For large volume of data, aside from the files being capped, the compaction background job deletes old data files,
 creating new ones with the current set of data used. This reduces wasted disk space.
 
+### Replicate data to multiple nodes
+
+Replication is done in distributed mode, using a variation of the Paxos consensus algorithm
+called [Raft](https://web.stanford.edu/~ouster/cgi-bin/papers/raft-atc14.pdf).
+Log is configured to replicate every 5 seconds from leader to follower nodes.
+
+Because of replication, a minimum of 2 nodes must be online to achieve majority.
+A request from a client is only accepted if it can be applied to a majority of nodes.
+
+### Handle automatic failover to the other nodes
+
+If a leader node stops, the follower nodes will elect a new leader after a few seconds.
+There is no redirect configured, but requests will only be permitted for the new leader.
+Data is still replicated and client commands (PUT, DELETE) can be continued on the new leader.
+
 ## Requirements
 
 * Rust `1.84.1` installed. [Documentation](https://www.rust-lang.org/tools/install)
 
 ## Running
 
-To start a single server, do:
+### Distributed storage
+
+If you want to run as a distributed storage, you can launch up to 3 pre-configured servers.
 
 ```bash
-cargo run
+cargo run port 4000 data-dir data4000
+cargo run port 5000 data-dir data5000
+cargo run port 6000 data-dir data6000
+```
+
+There is no service discovery implemented, so the nodes ports are hardcoded in the code, in `src/distributed/mod.rs`.
+
+```rust
+pub fn new_distributed_storage(host: &str, port: u16, data_dir: &str, distributed: bool) -> Result<DistributedStorage, Error> {
+    let node_id = port as u64;
+    let nodes_map = HashMap::from([(4000, 4000), (5000, 5000), (6000, 6000)]);
+    let nodes = vec![4000, 5000, 6000];
+    //...
+}
+```
+
+No redirection was implemented. If you try to do a `POST` or `DELETE` action in a non leader node, you will see an error
+message with the leader id (if known by the node)
+
+### Local storage
+
+You can also run a single server:
+
+```bash
+cargo run distributed false
 ```
 
 A server will start at port 4000.
@@ -93,11 +136,12 @@ You can pass arguments to the command to specify some configurations:
 
 - port: port where the server starts
 - data-dir: directory where the data files are stored
+- distributed: true/false if the storage should run in distributed or local mode
 
 Example:
 
 ```bash
-cargo run port 5000 data-dir other-data-dir
+cargo run port 5000 data-dir other-data-dir distributed false
 ```
 
 ## Tests
