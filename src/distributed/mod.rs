@@ -1,10 +1,12 @@
-use crate::distributed::node::{new_node, Leader, LogEntry, Node};
+use crate::distributed::entry::LogEntry;
+use crate::distributed::node::{new_node, Leader, Node};
 use crate::distributed::rpc::new_rpc;
 use crate::storage::bit_cask::{new_bit_cask, BitCask};
 use crate::storage::{KVStorage, KV};
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 
+mod entry;
 mod logfile;
 pub(crate) mod node;
 mod rand;
@@ -111,7 +113,8 @@ impl DistributedStorage {
 
 #[cfg(test)]
 mod tests {
-    use crate::distributed::node::{new_node, Follower, LogEntry};
+    use crate::distributed::entry::LogEntry;
+    use crate::distributed::node::{new_node, Follower};
     use crate::distributed::rpc::{AppendEntriesRequest, VoteRequest};
 
     #[test]

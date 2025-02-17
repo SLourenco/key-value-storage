@@ -1,6 +1,6 @@
 // #![feature(test)]
 // extern crate test;
-use crate::distributed::node::{Follower, LogEntry};
+use crate::distributed::node::Follower;
 mod distributed;
 mod http;
 mod storage;
@@ -12,6 +12,7 @@ use crate::storage::KV;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Error, ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::str::FromStr;
 use std::{env, str};
 
 const DEFAULT_PORT: &str = "4000";
@@ -183,43 +184,7 @@ fn read_append_entries_request(
     if reader.read_exact(&mut buffer).is_ok() {
         let content = String::from_utf8_lossy(&buffer);
         for line in content.lines() {
-            // e.g.: 6000,2,5000,0,0,,0
-            let mut parts = line.split(',');
-            if let (
-                Some(node),
-                Some(term),
-                Some(leader_id),
-                Some(prev_log_idx),
-                Some(prev_log_term),
-                Some(entries),
-                Some(lead_commit),
-            ) = (
-                parts.next(),
-                parts.next(),
-                parts.next(),
-                parts.next(),
-                parts.next(),
-                parts.next(),
-                parts.next(),
-            ) {
-                append_entries_request.node = node.parse().unwrap();
-                append_entries_request.term = term.parse().unwrap();
-                append_entries_request.leader_id = leader_id.parse().unwrap();
-                append_entries_request.prev_log_idx = prev_log_idx.parse().unwrap();
-                append_entries_request.prev_log_term = prev_log_term.parse().unwrap();
-                if entries.len() > 0 {
-                    let entries = entries.split('+');
-                    for e in entries {
-                        if e.len() <= 0 {
-                            continue;
-                        }
-                        let mut le: LogEntry = Default::default();
-                        le = le.parse(e)?;
-                        append_entries_request.entries.push(le);
-                    }
-                }
-                append_entries_request.lead_commit = lead_commit.parse().unwrap();
-            }
+            append_entries_request = AppendEntriesRequest::from_str(line)?;
         }
     }
 
@@ -245,26 +210,7 @@ fn read_vote_request(
     if reader.read_exact(&mut buffer).is_ok() {
         let content = String::from_utf8_lossy(&buffer);
         for line in content.lines() {
-            let mut parts = line.split(',');
-            if let (
-                Some(node),
-                Some(term),
-                Some(candidate_id),
-                Some(last_log_idx),
-                Some(last_log_term),
-            ) = (
-                parts.next(),
-                parts.next(),
-                parts.next(),
-                parts.next(),
-                parts.next(),
-            ) {
-                vote_request.node = node.parse().unwrap();
-                vote_request.term = term.parse().unwrap();
-                vote_request.candidate_id = candidate_id.parse().unwrap();
-                vote_request.last_log_idx = last_log_idx.parse().unwrap();
-                vote_request.last_log_term = last_log_term.parse().unwrap();
-            }
+            vote_request = VoteRequest::from_str(line)?;
         }
     }
 

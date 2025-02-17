@@ -1,10 +1,11 @@
+use crate::distributed::entry::LogEntry;
 use crate::distributed::logfile::{
     append_to_file, create_new_file, get_log_filename, read_log_file,
 };
 use crate::distributed::rand::get_timer_reset;
 use crate::distributed::rpc::{AppendEntriesRequest, HTTPNode, VoteRequest};
 use crate::storage::bit_cask::BitCask;
-use crate::storage::{KVStorage, KV};
+use crate::storage::KVStorage;
 use std::cmp::max;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
@@ -24,86 +25,6 @@ pub trait Leader {
 
 trait Candidate {
     fn start_election(&mut self, nodes: Vec<u64>, rpc: HTTPNode) -> Result<bool, Error>;
-}
-
-#[derive(Clone, Default)]
-pub struct LogEntry {
-    pub(crate) term: u64,
-    pub(crate) entry: String,
-    pub(crate) entry_idx: u64,
-}
-
-impl LogEntry {
-    pub fn format(&self) -> String {
-        format!("{}|{}|{}", self.term, self.entry, self.entry_idx)
-    }
-
-    pub fn parse(&self, entry: &str) -> Result<LogEntry, Error> {
-        let mut e = entry.split("|");
-        let mut le: LogEntry = Default::default();
-        if let (Some(term), Some(entry), Some(e_idx)) = (e.next(), e.next(), e.next()) {
-            le.term = term.parse::<u64>().unwrap_or(0);
-            le.entry = entry.to_string();
-            le.entry_idx = e_idx.parse::<u64>().unwrap_or(0);
-        } else {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                format!("Invalid log entry {}", entry),
-            ));
-        }
-        Ok(le)
-    }
-
-    pub fn format_command(&self, cmd: &str, values: Vec<KV>) -> String {
-        if cmd == "DELETE" {
-            return format!("{}:{}", cmd, values.first().unwrap().key);
-        }
-
-        let mut entries = String::new();
-        for v in values.clone() {
-            entries.push_str(&format!("{}.{};", v.key, v.value));
-        }
-        if values.len() > 0 {
-            entries.pop();
-        }
-        let encoded = format!("{}:{}", cmd, entries);
-        encoded
-    }
-
-    pub fn parse_command(&self, cmd: &str) -> Result<(String, Vec<KV>), Error> {
-        let mut c = cmd.split(":");
-        let mut f_values = Vec::new();
-        if let (Some(command), Some(values)) = (c.next(), c.next()) {
-            if command == "DELETE" {
-                f_values.push(KV {
-                    key: values.parse().unwrap(),
-                    value: Default::default(),
-                });
-                return Ok((command.to_string(), f_values));
-            }
-
-            let values_iter = values.split(";");
-            for v in values_iter {
-                let mut kv = v.split(".");
-                if let (Some(key), Some(val)) = (kv.next(), kv.next()) {
-                    f_values.push(KV {
-                        key: key.parse().unwrap(),
-                        value: val.to_string(),
-                    })
-                } else {
-                    return Err(Error::new(
-                        ErrorKind::InvalidInput,
-                        format!("Invalid value {}", command),
-                    ));
-                }
-            }
-            return Ok((command.to_string(), f_values));
-        }
-        Err(Error::new(
-            ErrorKind::InvalidInput,
-            format!("Invalid command {}", cmd),
-        ))
-    }
 }
 
 #[derive(Clone, Eq, PartialEq)]
